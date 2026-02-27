@@ -1,3 +1,4 @@
+wget -q https://raw.githubusercontent.com/ReturnFI/SSH-VPN/main/ssh_panel.py && python3 ssh_panel.py
 #!/usr/bin/env python3
 import json
 import os
