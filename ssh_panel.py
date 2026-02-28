@@ -1,16 +1,24 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-import json
+
 import os
 import sys
+import json
 import re
 import subprocess
-import pwd
 import datetime
 import tempfile
 import shutil
+import pwd
+import bcrypt
 import secrets
 import string
-from pathlib import Path
+
+SSH_CONFIG = "/etc/ssh/sshd_config"
+USER_DB = "/opt/ssh_vpn_users.json"
+VPN_GROUP = "vpnusers"
+SHELL_NOLOGIN = "/usr/sbin/nologin"
+SHELL_FALSE = "/bin/false"
 
 class Colors:
     RED = '\033[91m'
@@ -20,225 +28,176 @@ class Colors:
     CYAN = '\033[96m'
     RESET = '\033[0m'
 
-class SSHVPNManager:
-    def __init__(self):
-        self.shell_nologin = "/usr/sbin/nologin"
-        self.user_db = "/opt/ssh_vpn_users.json"
-        self.ssh_config = "/etc/ssh/sshd_config"
-        self.group_name = "vpnusers"
+def check_root():
+    if os.geteuid() != 0:
+        print(f"{Colors.RED}❌ Script must be run as root{Colors.RESET}")
+        sys.exit(1)
 
-    # -------------------- SYSTEM CHECK --------------------
+def init_user_db():
+    if not os.path.exists(USER_DB):
+        with open(USER_DB, "w") as f:
+            json.dump({"users": []}, f)
+        os.chmod(USER_DB, 0o600)
 
-    def check_root(self):
-        if os.geteuid() != 0:
-            print(f"{Colors.RED}Run as root!{Colors.RESET}")
-            sys.exit(1)
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-    def ensure_group_exists(self):
-        try:
-            subprocess.run(["getent", "group", self.group_name], check=True, stdout=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            subprocess.run(["groupadd", self.group_name], check=True)
+def generate_password(length=12) -> str:
+    chars = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(chars) for _ in range(length))
 
-    def init_db(self):
-        if not os.path.exists(self.user_db):
-            with open(self.user_db, 'w') as f:
-                json.dump({"users": []}, f, indent=2)
-            os.chmod(self.user_db, 0o600)
+def load_users():
+    if not os.path.exists(USER_DB):
+        return {"users": []}
+    try:
+        with open(USER_DB, "r") as f:
+            return json.load(f)
+    except:
+        return {"users": []}
 
-    # -------------------- PASSWORD --------------------
+def save_users(data):
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tf:
+        json.dump(data, tf)
+        temp_path = tf.name
+    shutil.move(temp_path, USER_DB)
+    os.chmod(USER_DB, 0o600)
 
-    def generate_password(self, length=16):
-        alphabet = string.ascii_letters + string.digits
-        return ''.join(secrets.choice(alphabet) for _ in range(length))
+def user_exists_system(username):
+    try:
+        pwd.getpwnam(username)
+        return True
+    except KeyError:
+        return False
 
-    # -------------------- USER DB --------------------
+def user_exists_db(username):
+    data = load_users()
+    return any(u['username'] == username for u in data['users'])
 
-    def add_user_to_db(self, username):
-        self.init_db()
-        now = datetime.datetime.now(datetime.UTC).isoformat()
+def add_user_to_db(username, password):
+    data = load_users()
+    data['users'].append({
+        "username": username,
+        "password": hash_password(password),
+        "created": datetime.datetime.now().isoformat()
+    })
+    save_users(data)
 
-        with open(self.user_db, 'r') as f:
-            data = json.load(f)
+def remove_user_from_db(username):
+    data = load_users()
+    data['users'] = [u for u in data['users'] if u['username'] != username]
+    save_users(data)
 
-        data["users"].append({
-            "username": username,
-            "created": now,
-            "last_password_change": now
-        })
+def add_vpn_user():
+    while True:
+        username = input("Enter username (alphanumeric): ").strip()
+        if not username.isalnum():
+            print(f"{Colors.RED}❌ Username must be alphanumeric{Colors.RESET}")
+            continue
+        if user_exists_system(username):
+            print(f"{Colors.RED}❌ User exists in system{Colors.RESET}")
+            continue
+        if user_exists_db(username):
+            print(f"{Colors.RED}❌ User exists in VPN DB{Colors.RESET}")
+            continue
+        break
 
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
-            json.dump(data, tmp, indent=2)
-            temp_path = tmp.name
+    password = generate_password()
+    shell = SHELL_NOLOGIN if os.path.exists(SHELL_NOLOGIN) else SHELL_FALSE
 
-        shutil.move(temp_path, self.user_db)
-        os.chmod(self.user_db, 0o600)
-
-    def update_password_date(self, username):
-        with open(self.user_db, 'r') as f:
-            data = json.load(f)
-
-        now = datetime.datetime.now(datetime.UTC).isoformat()
-
-        for user in data["users"]:
-            if user["username"] == username:
-                user["last_password_change"] = now
-
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
-            json.dump(data, tmp, indent=2)
-            temp_path = tmp.name
-
-        shutil.move(temp_path, self.user_db)
-        os.chmod(self.user_db, 0o600)
-
-    def remove_user_from_db(self, username):
-        with open(self.user_db, 'r') as f:
-            data = json.load(f)
-
-        data["users"] = [u for u in data["users"] if u["username"] != username]
-
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
-            json.dump(data, tmp, indent=2)
-            temp_path = tmp.name
-
-        shutil.move(temp_path, self.user_db)
-        os.chmod(self.user_db, 0o600)
-
-    # -------------------- SSH HARDENING --------------------
-
-    def harden_ssh(self):
-        with open(self.ssh_config, 'r') as f:
-            content = f.read()
-
-        if "Match Group vpnusers" not in content:
-            with open(self.ssh_config, 'a') as f:
-                f.write(f"""
-
-Match Group {self.group_name}
-    AllowTcpForwarding yes
-    X11Forwarding no
-    AllowAgentForwarding no
-    PermitTunnel no
-    ForceCommand echo 'This account is restricted to SSH tunneling only'
-""")
-
-        subprocess.run(["systemctl", "restart", "ssh"], check=True)
-
-    # -------------------- USER MANAGEMENT --------------------
-
-    def add_user(self):
-        username = input("Username: ").strip()
-
-        if not re.match(r'^[a-zA-Z0-9]+$', username):
-            print("Alphanumeric only.")
-            return
-
-        try:
-            pwd.getpwnam(username)
-            print("User exists.")
-            return
-        except KeyError:
-            pass
-
-        password = self.generate_password()
-
-        subprocess.run(["useradd", "-M", "-s", self.shell_nologin, "-G", self.group_name, username], check=True)
+    try:
+        subprocess.run(["useradd", "-M", "-s", shell, username], check=True)
         subprocess.run(["chpasswd"], input=f"{username}:{password}", text=True, check=True)
+        subprocess.run(["groupadd", "-f", VPN_GROUP], check=True)
+        subprocess.run(["usermod", "-aG", VPN_GROUP, username], check=True)
+        add_user_to_db(username, password)
+        print(f"{Colors.GREEN}✅ User {username} created successfully{Colors.RESET}")
+        print(f"{Colors.YELLOW}Generated password (copy it now, it won’t be shown again): {password}{Colors.RESET}")
+    except subprocess.CalledProcessError as e:
+        print(f"{Colors.RED}❌ Failed to add user: {e}{Colors.RESET}")
 
-        self.add_user_to_db(username)
+def remove_vpn_user():
+    username = input("Enter username to remove: ").strip()
+    if not username:
+        return
+    if not user_exists_system(username):
+        print(f"{Colors.RED}❌ User does not exist{Colors.RESET}")
+        return
+    confirm = input(f"Confirm remove {username}? (y/N): ").strip().lower()
+    if not confirm.startswith("y"):
+        return
+    try:
+        subprocess.run(["userdel", "-r", username], check=True, stderr=subprocess.DEVNULL)
+        remove_user_from_db(username)
+        print(f"{Colors.GREEN}🗑️ User {username} removed{Colors.RESET}")
+    except subprocess.CalledProcessError:
+        print(f"{Colors.RED}❌ Failed to remove user{Colors.RESET}")
 
-        print(f"{Colors.GREEN}User created!{Colors.RESET}")
-        print(f"{Colors.YELLOW}Password (save it now): {password}{Colors.RESET}")
+def list_users():
+    data = load_users()
+    if not data['users']:
+        print(f"{Colors.YELLOW}📝 No VPN users found{Colors.RESET}")
+        return
+    print(f"{Colors.CYAN}📄 VPN Users:{Colors.RESET}")
+    for u in data['users']:
+        print(f"🔹 {u['username']} | created: {u['created']} | password: [HIDDEN]")
 
-    def remove_user(self):
-        username = input("Username to remove: ").strip()
+def add_ssh_port():
+    port = input("Enter new SSH port for VPN clients: ").strip()
+    if not port.isdigit() or not (1 <= int(port) <= 65535):
+        print(f"{Colors.RED}❌ Invalid port{Colors.RESET}")
+        return
+    port = int(port)
 
-        subprocess.run(["userdel", "-r", username], stderr=subprocess.DEVNULL)
-        self.remove_user_from_db(username)
+    with open(SSH_CONFIG, "r") as f:
+        lines = f.read().splitlines()
 
-        print("User removed.")
+    existing_ports = [int(m.group(1)) for l in lines if (m:=re.match(r'^\s*Port\s+(\d+)', l))]
+    if port in existing_ports:
+        print(f"{Colors.YELLOW}⚠️ Port {port} already exists{Colors.RESET}")
+        return
 
-    def list_users(self):
-        self.init_db()
-        with open(self.user_db, 'r') as f:
-            data = json.load(f)
+    insert_index = 0
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("match"):
+            insert_index = i
+            break
+    lines.insert(insert_index, f"Port {port}")
 
-        print("\nVPN USERS:")
-        for user in data["users"]:
-            print(f"- {user['username']} | Created: {user['created']} | Last change: {user['last_password_change']}")
+    with open(SSH_CONFIG, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
-    def change_password(self):
-        username = input("Username: ").strip()
-        password = self.generate_password()
-
-        subprocess.run(["chpasswd"], input=f"{username}:{password}", text=True, check=True)
-        self.update_password_date(username)
-
-        print(f"{Colors.GREEN}Password updated!{Colors.RESET}")
-        print(f"{Colors.YELLOW}New password: {password}{Colors.RESET}")
-
-    # -------------------- SSH PORT --------------------
-
-    def change_port(self):
-        port = input("New SSH port: ").strip()
-
-        if not port.isdigit():
-            print("Invalid port.")
-            return
-
-        shutil.copy2(self.ssh_config, f"{self.ssh_config}.bak")
-
-        with open(self.ssh_config, 'r') as f:
-            lines = f.readlines()
-
-        lines = [l for l in lines if not re.match(r'^\s*#?\s*Port\s+', l)]
-        lines.append(f"Port {port}\n")
-
-        with open(self.ssh_config, 'w') as f:
-            f.writelines(lines)
-
+    try:
         subprocess.run(["systemctl", "restart", "ssh"], check=True)
-        print(f"SSH now on port {port}")
+        print(f"{Colors.GREEN}✅ SSH now listens on port {port}{Colors.RESET}")
+    except subprocess.CalledProcessError:
+        print(f"{Colors.RED}❌ Failed to restart SSH, check manually{Colors.RESET}")
 
-    # -------------------- MENU --------------------
-
-    def menu(self):
-        while True:
-            print(f"""
-{Colors.CYAN}====== SSH VPN MANAGER ======{Colors.RESET}
-1) Add User
-2) Remove User
-3) List Users
-4) Change User Password
-5) Change SSH Port
-6) Harden SSH (recommended first run)
-7) Exit
-""")
-            choice = input("Select: ").strip()
-
-            if choice == "1":
-                self.add_user()
-            elif choice == "2":
-                self.remove_user()
-            elif choice == "3":
-                self.list_users()
-            elif choice == "4":
-                self.change_password()
-            elif choice == "5":
-                self.change_port()
-            elif choice == "6":
-                self.harden_ssh()
-                print("SSH hardened.")
-            elif choice == "7":
-                sys.exit(0)
-            else:
-                print("Invalid.")
-
-    def run(self):
-        self.check_root()
-        self.ensure_group_exists()
-        self.init_db()
-        self.menu()
+def main_menu():
+    while True:
+        print(f"""{Colors.CYAN}
+========== SSH VPN MANAGER ==========
+{Colors.GREEN}1) Add VPN User{Colors.RESET}
+{Colors.RED}2) Remove VPN User{Colors.RESET}
+{Colors.YELLOW}3) List VPN Users{Colors.RESET}
+{Colors.BLUE}4) Add SSH Port for VPN Clients{Colors.RESET}
+{Colors.RED}5) Exit{Colors.RESET}
+{Colors.CYAN}==================================
+{Colors.RESET}""")
+        choice = input("Select: ").strip()
+        if choice == "1":
+            add_vpn_user()
+        elif choice == "2":
+            remove_vpn_user()
+        elif choice == "3":
+            list_users()
+        elif choice == "4":
+            add_ssh_port()
+        elif choice == "5":
+            sys.exit(0)
+        else:
+            print(f"{Colors.RED}❌ Invalid option{Colors.RESET}")
 
 if __name__ == "__main__":
-    SSHVPNManager().run()
+    check_root()
+    init_user_db()
+    main_menu()
