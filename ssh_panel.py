@@ -20,17 +20,9 @@ VPN_GROUP = "vpnusers"
 SHELL_NOLOGIN = "/usr/sbin/nologin"
 SHELL_FALSE = "/bin/false"
 
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    RESET = '\033[0m'
-
 def check_root():
     if os.geteuid() != 0:
-        print(f"{Colors.RED}❌ Script must be run as root{Colors.RESET}")
+        print("ERROR: Script must be run as root")
         sys.exit(1)
 
 def init_user_db():
@@ -91,13 +83,13 @@ def add_vpn_user():
     while True:
         username = input("Enter username (alphanumeric): ").strip()
         if not username.isalnum():
-            print(f"{Colors.RED}❌ Username must be alphanumeric{Colors.RESET}")
+            print("ERROR: Username must be alphanumeric")
             continue
         if user_exists_system(username):
-            print(f"{Colors.RED}❌ User exists in system{Colors.RESET}")
+            print("ERROR: User exists in system")
             continue
         if user_exists_db(username):
-            print(f"{Colors.RED}❌ User exists in VPN DB{Colors.RESET}")
+            print("ERROR: User exists in VPN DB")
             continue
         break
 
@@ -110,17 +102,17 @@ def add_vpn_user():
         subprocess.run(["groupadd", "-f", VPN_GROUP], check=True)
         subprocess.run(["usermod", "-aG", VPN_GROUP, username], check=True)
         add_user_to_db(username, password)
-        print(f"{Colors.GREEN}✅ User {username} created successfully{Colors.RESET}")
-        print(f"{Colors.YELLOW}Generated password (copy it now, it won’t be shown again): {password}{Colors.RESET}")
+        print(f"User {username} created successfully")
+        print(f"Generated password (copy it now, it won’t be shown again): {password}")
     except subprocess.CalledProcessError as e:
-        print(f"{Colors.RED}❌ Failed to add user: {e}{Colors.RESET}")
+        print(f"ERROR: Failed to add user: {e}")
 
 def remove_vpn_user():
     username = input("Enter username to remove: ").strip()
     if not username:
         return
     if not user_exists_system(username):
-        print(f"{Colors.RED}❌ User does not exist{Colors.RESET}")
+        print("ERROR: User does not exist")
         return
     confirm = input(f"Confirm remove {username}? (y/N): ").strip().lower()
     if not confirm.startswith("y"):
@@ -128,23 +120,23 @@ def remove_vpn_user():
     try:
         subprocess.run(["userdel", "-r", username], check=True, stderr=subprocess.DEVNULL)
         remove_user_from_db(username)
-        print(f"{Colors.GREEN}🗑️ User {username} removed{Colors.RESET}")
+        print(f"User {username} removed")
     except subprocess.CalledProcessError:
-        print(f"{Colors.RED}❌ Failed to remove user{Colors.RESET}")
+        print("ERROR: Failed to remove user")
 
 def list_users():
     data = load_users()
     if not data['users']:
-        print(f"{Colors.YELLOW}📝 No VPN users found{Colors.RESET}")
+        print("No VPN users found")
         return
-    print(f"{Colors.CYAN}📄 VPN Users:{Colors.RESET}")
+    print("VPN Users:")
     for u in data['users']:
-        print(f"🔹 {u['username']} | created: {u['created']} | password: [HIDDEN]")
+        print(f"- {u['username']} | created: {u['created']} | password: [HIDDEN]")
 
 def add_ssh_port():
     port = input("Enter new SSH port for VPN clients: ").strip()
     if not port.isdigit() or not (1 <= int(port) <= 65535):
-        print(f"{Colors.RED}❌ Invalid port{Colors.RESET}")
+        print("ERROR: Invalid port")
         return
     port = int(port)
 
@@ -153,7 +145,7 @@ def add_ssh_port():
 
     existing_ports = [int(m.group(1)) for l in lines if (m:=re.match(r'^\s*Port\s+(\d+)', l))]
     if port in existing_ports:
-        print(f"{Colors.YELLOW}⚠️ Port {port} already exists{Colors.RESET}")
+        print(f"Port {port} already exists")
         return
 
     insert_index = 0
@@ -168,21 +160,21 @@ def add_ssh_port():
 
     try:
         subprocess.run(["systemctl", "restart", "ssh"], check=True)
-        print(f"{Colors.GREEN}✅ SSH now listens on port {port}{Colors.RESET}")
+        print(f"SSH now listens on port {port}")
     except subprocess.CalledProcessError:
-        print(f"{Colors.RED}❌ Failed to restart SSH, check manually{Colors.RESET}")
+        print("ERROR: Failed to restart SSH, check manually")
 
 def main_menu():
     while True:
-        print(f"""{Colors.CYAN}
+        print("""
 ========== SSH VPN MANAGER ==========
-{Colors.GREEN}1) Add VPN User{Colors.RESET}
-{Colors.RED}2) Remove VPN User{Colors.RESET}
-{Colors.YELLOW}3) List VPN Users{Colors.RESET}
-{Colors.BLUE}4) Add SSH Port for VPN Clients{Colors.RESET}
-{Colors.RED}5) Exit{Colors.RESET}
-{Colors.CYAN}==================================
-{Colors.RESET}""")
+1) Add VPN User
+2) Remove VPN User
+3) List VPN Users
+4) Add SSH Port for VPN Clients
+5) Exit
+==================================
+""")
         choice = input("Select: ").strip()
         if choice == "1":
             add_vpn_user()
@@ -195,7 +187,7 @@ def main_menu():
         elif choice == "5":
             sys.exit(0)
         else:
-            print(f"{Colors.RED}❌ Invalid option{Colors.RESET}")
+            print("ERROR: Invalid option")
 
 if __name__ == "__main__":
     check_root()
